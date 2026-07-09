@@ -692,6 +692,7 @@ def _load_diffusers_pipe(
     mode: str,
     transformer_subfolder: str,
     defer_transformer_to_device: bool = False,
+    cpu_offload: str = "none",
 ) -> Any:
     pipeline_class = _pipeline_class_for_mode(mode)
     transformer = _load_transformer_component(model_dir, transformer_subfolder, dtype_map)
@@ -707,6 +708,15 @@ def _load_diffusers_pipe(
         )
     _log_progress(f"loaded pipeline mode={mode}")
     device = _default_device()
+    if cpu_offload != "none":
+        if defer_transformer_to_device:
+            raise ValueError("--cpu_offload cannot be combined with deferred transformer placement.")
+        _log_progress(f"enabling {cpu_offload} CPU offload to {device}")
+        if cpu_offload == "model":
+            pipe.enable_model_cpu_offload(device=device)
+        else:
+            pipe.enable_sequential_cpu_offload(device=device)
+        return pipe
     if defer_transformer_to_device:
         return _move_pipeline_aux_modules_to_device(pipe, device)
     _log_progress(f"moving pipeline to {device}")
@@ -757,6 +767,7 @@ def _load_pipe(
                 mode=args.mode,
                 transformer_subfolder=args.transformer_subfolder,
                 defer_transformer_to_device=defer_transformer_to_device,
+                cpu_offload=args.cpu_offload,
             ),
             "diffusers-reference",
         )
@@ -1010,6 +1021,11 @@ def main() -> None:
     parser.add_argument("--diffusers_attn_backend", default=os.environ.get("DIFFUSERS_ATTN_BACKEND", ""))
     parser.add_argument("--allow_tf32", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument(
+        "--cpu_offload",
+        choices=["none", "model", "sequential"],
+        default="none",
+    )
+    parser.add_argument(
         "--quiet_progress",
         action="store_true",
         help="Disable model-loading logs and denoising progress bars.",
@@ -1051,6 +1067,21 @@ def main() -> None:
         backend=args.backend,
         stderr=sys.stderr,
     )
+    if args.cpu_offload != "none":
+        _, _, world_size = _distributed_env()
+        if args.engine != "diffusers":
+            raise ValueError("--cpu_offload supports the diffusers engine only.")
+        if not torch.cuda.is_available():
+            raise RuntimeError("--cpu_offload requires CUDA.")
+        if (
+            world_size != 1
+            or args.enable_fsdp_inference
+            or args.cfg_parallel_degree > 1
+            or args.context_parallel_degree > 1
+        ):
+            raise ValueError(
+                "--cpu_offload requires single-process inference without FSDP, CFG, or CP."
+            )
     args.negative_prompt = resolve_negative_prompt_arg(
         args.negative_prompt,
         args.negative_prompt_json,

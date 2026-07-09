@@ -686,12 +686,32 @@ def _move_pipeline_aux_modules_to_device(pipe: Any, device: torch.device) -> Any
     return pipe
 
 
+def _enable_cpu_offload(pipe: Any, cpu_offload: str) -> Any:
+    if cpu_offload == "none":
+        return pipe
+    if not torch.cuda.is_available():
+        raise RuntimeError("--cpu_offload requires a CUDA device.")
+
+    inner_pipe = _inner_diffusers_pipe(pipe)
+    device = _default_device()
+    if cpu_offload == "model":
+        _log_progress(f"enabling model CPU offload to {device}")
+        inner_pipe.enable_model_cpu_offload(device=device)
+        return pipe
+    if cpu_offload == "sequential":
+        _log_progress(f"enabling sequential CPU offload to {device}")
+        inner_pipe.enable_sequential_cpu_offload(device=device)
+        return pipe
+    raise ValueError(f"unsupported CPU offload mode: {cpu_offload}")
+
+
 def _load_diffusers_pipe(
     model_dir: Path,
     dtype_map: dict[str, torch.dtype],
     mode: str,
     transformer_subfolder: str,
     defer_transformer_to_device: bool = False,
+    cpu_offload: str = "none",
 ) -> Any:
     pipeline_class = _pipeline_class_for_mode(mode)
     transformer = _load_transformer_component(model_dir, transformer_subfolder, dtype_map)
@@ -707,6 +727,10 @@ def _load_diffusers_pipe(
         )
     _log_progress(f"loaded pipeline mode={mode}")
     device = _default_device()
+    if cpu_offload != "none":
+        if defer_transformer_to_device:
+            raise ValueError("--cpu_offload cannot be combined with deferred transformer placement.")
+        return _enable_cpu_offload(pipe, cpu_offload)
     if defer_transformer_to_device:
         return _move_pipeline_aux_modules_to_device(pipe, device)
     _log_progress(f"moving pipeline to {device}")
@@ -719,6 +743,7 @@ def _load_sglang_native_pipe(
     mode: str,
     transformer_subfolder: str,
     defer_transformer_to_device: bool = False,
+    cpu_offload: str = "none",
 ) -> Any:
     if LingBotVideoNativePipeline is None or register_lingbot_native_pipeline is None:
         raise RuntimeError(
@@ -733,6 +758,7 @@ def _load_sglang_native_pipe(
             mode=mode,
             transformer_subfolder=transformer_subfolder,
             defer_transformer_to_device=defer_transformer_to_device,
+            cpu_offload=cpu_offload,
         )
         return LingBotVideoNativePipeline.from_diffusers_pipe(
             diffusers_pipe,
@@ -757,6 +783,7 @@ def _load_pipe(
                 mode=args.mode,
                 transformer_subfolder=args.transformer_subfolder,
                 defer_transformer_to_device=defer_transformer_to_device,
+                cpu_offload=args.cpu_offload,
             ),
             "diffusers-reference",
         )
@@ -768,6 +795,7 @@ def _load_pipe(
                 mode=args.mode,
                 transformer_subfolder=args.transformer_subfolder,
                 defer_transformer_to_device=defer_transformer_to_device,
+                cpu_offload=args.cpu_offload,
             ),
             "sglang-native",
         )
@@ -1010,6 +1038,16 @@ def main() -> None:
     parser.add_argument("--diffusers_attn_backend", default=os.environ.get("DIFFUSERS_ATTN_BACKEND", ""))
     parser.add_argument("--allow_tf32", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument(
+        "--cpu_offload",
+        choices=["none", "model", "sequential"],
+        default="none",
+        help=(
+            "Enable Diffusers CPU offload for single-process diffusers inference. "
+            "`model` uses enable_model_cpu_offload(); `sequential` uses "
+            "enable_sequential_cpu_offload()."
+        ),
+    )
+    parser.add_argument(
         "--quiet_progress",
         action="store_true",
         help="Disable model-loading logs and denoising progress bars.",
@@ -1051,6 +1089,8 @@ def main() -> None:
         backend=args.backend,
         stderr=sys.stderr,
     )
+    if args.cpu_offload != "none" and args.engine != "diffusers":
+        raise ValueError("--cpu_offload currently supports the diffusers engine only.")
     args.negative_prompt = resolve_negative_prompt_arg(
         args.negative_prompt,
         args.negative_prompt_json,
@@ -1099,6 +1139,15 @@ def main() -> None:
     )
     if args.cfg_parallel_degree > 1 and args.batch_cfg:
         raise ValueError("`--cfg_parallel_degree > 1` and `--batch_cfg` are mutually exclusive.")
+    if args.cpu_offload != "none" and (
+        args.enable_fsdp_inference
+        or args.cfg_parallel_degree > 1
+        or args.context_parallel_degree > 1
+    ):
+        raise ValueError(
+            "`--cpu_offload` is only supported for single-process inference without "
+            "FSDP, CFG parallelism, or context parallelism."
+        )
     if args.refiner_model_dir and args.cfg_parallel_degree > 1 and args.refiner_batch_cfg:
         raise ValueError(
             "`--cfg_parallel_degree > 1` and `--refiner_batch_cfg` are mutually exclusive."
@@ -1245,6 +1294,7 @@ def main() -> None:
             f"guidance={args.guidance_scale} shift={args.shift} seed={args.seed} "
             f"attn_backend={os.environ.get('DIFFUSERS_ATTN_BACKEND')} "
             f"allow_tf32={torch.backends.cuda.matmul.allow_tf32} "
+            f"cpu_offload={args.cpu_offload} "
             f"fsdp_inference={base_fsdp_info} "
             f"component_dtypes={component_dtypes}",
             flush=True,
@@ -1352,6 +1402,7 @@ def main() -> None:
             f"t_thresh={args.refiner_t_thresh} tail_steps={args.refiner_sigma_tail_steps} "
             f"seed={args.seed} "
             f"batch_cfg={args.refiner_batch_cfg} "
+            f"cpu_offload={args.cpu_offload} "
             f"first_frame_condition={first_frame_condition_enabled} "
             f"fsdp_inference={refiner_fsdp_info} "
             f"component_dtypes={refiner_component_dtypes}",

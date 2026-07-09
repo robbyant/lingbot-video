@@ -99,7 +99,12 @@ class LingBotVideoPipeline(DiffusionPipeline):
     or CFG parallelism is explicitly requested.
     """
 
-    model_cpu_offload_seq = "text_encoder->transformer->vae"
+    # Keep the fp32 3D VAE resident when Diffusers CPU offload hooks are used.
+    # The VAE runs after denoising through an explicit decode path below; moving
+    # it through the generic offload sequence can leave its inputs on the wrong
+    # device or in meta-backed state.
+    model_cpu_offload_seq = "text_encoder->transformer"
+    _exclude_from_cpu_offload = ["vae"]
 
     def __init__(self, transformer, vae, text_encoder, processor, scheduler):
         super().__init__()

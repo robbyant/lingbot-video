@@ -100,6 +100,39 @@ python scripts/inference.py \
 The refiner is only supported for video modes. It reuses base condition
 features when `--reuse_condition_features` is enabled.
 
+## Single-GPU CPU Offload
+
+Use `--cpu_offload model` or `--cpu_offload sequential` to enable the Diffusers
+CPU offload hooks on single-GPU diffusers inference:
+
+```bash
+python scripts/inference.py \
+  --backend diffusers \
+  --model_dir "$MODEL_DIR" \
+  --mode t2v \
+  --prompt_json "assets/cases/t2v/example_1/prompt.json" \
+  --output "outputs/t2v_offload.mp4" \
+  --height 480 \
+  --width 832 \
+  --num_frames 121 \
+  --fps 24 \
+  --steps 40 \
+  --guidance_scale 3 \
+  --shift 3 \
+  --transformer_dtype bf16 \
+  --text_encoder_dtype bf16 \
+  --vae_dtype fp32 \
+  --cpu_offload model
+```
+
+`model` offload is faster and uses more VRAM than `sequential` offload.
+The LingBot VAE is intentionally excluded from the generic Diffusers offload
+sequence and kept resident while the text encoder and transformer are offloaded;
+this keeps the fp32 3D VAE decode path device-stable.
+
+CPU offload is only supported for single-process diffusers inference. It cannot
+be combined with FSDP inference, CFG parallelism, or context parallelism.
+
 ## Multi-GPU FSDP Inference
 
 Use `--enable_fsdp_inference` when the base DiT and refiner DiT need to stay
